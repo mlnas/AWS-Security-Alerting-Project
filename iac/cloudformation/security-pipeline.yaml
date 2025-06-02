@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Security Alerting Pipeline - Integrates GuardDuty and Security Hub with JIRA and Slack'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: security-alerts
+    Description: Name of the project for resource tagging
+    
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+    
+  JiraInstanceUrl:
+    Type: String
+    Description: JIRA instance URL (e.g., https://your-domain.atlassian.net)
+    
+  JiraProjectKey:
+    Type: String
+    Description: JIRA project key where tickets will be created
+    
+  JiraApiToken:
+    Type: String
+    NoEcho: true
+    Description: JIRA API token for authentication
+    
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Slack webhook URL for notifications
+
+Resources:
+  # Enable GuardDuty
+  GuardDutyDetector:
+    Type: AWS::GuardDuty::Detector
+    Properties:
+      Enable: true
+      DataSources:
+        S3Logs:
+          Enable: true
+        Kubernetes:
+          AuditLogs:
+            Enable: true
+            
+  # Enable Security Hub
+  SecurityHub:
+    Type: AWS::SecurityHub::Hub
+    Properties: {}
+      
+  # SNS Topic for Alerts
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-alerts-${Environment}
+      KmsMasterKeyId: alias/aws/sns
+      
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecurityAlertsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - securityhub:GetFindings
+                  - guardduty:GetFindings
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AlertsTopic
+                  - !Sub arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:hub/default
+                  - !Sub arn:aws:guardduty:${AWS::Region}:${AWS::AccountId}:detector/*
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}*
+                  
+  # Secrets for API Credentials
+  JiraSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/jira
+      Description: JIRA API credentials
+      SecretString: !Sub |
+        {
+          "instance_url": "${JiraInstanceUrl}",
+          "api_token": "${JiraApiToken}",
+          "project_key": "${JiraProjectKey}"
+        }
+        
+  SlackSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/slack
+      Description: Slack webhook URL
+      SecretString: !Sub |
+        {
+          "webhook_url": "${SlackWebhookUrl}"
+        }
+        
+  # Lambda Function
+  AlertProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-processor-${Environment}
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Code:
+        S3Bucket: !Sub ${ProjectName}-lambda-${AWS::AccountId}
+        S3Key: security-alerts.zip
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          
+  # Lambda Permission for SNS
+  LambdaSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AlertProcessorFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlertsTopic
+      
+  # SNS Topic Subscription
+  AlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: lambda
+      Endpoint: !GetAtt AlertProcessorFunction.Arn
+      
+  # VPC Resources
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda function
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          
+  # CloudWatch Log Group
+  AlertProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AlertProcessorFunction}
+      RetentionInDays: 30
+
+Outputs:
+  AlertTopicArn:
+    Description: ARN of the SNS topic for security alerts
+    Value: !Ref AlertsTopic
+    
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt AlertProcessorFunction.Arn
+    
+  GuardDutyDetectorId:
+    Description: ID of the GuardDuty detector
+    Value: !Ref GuardDutyDetector
+    
+  SecurityHubArn:
+    Description: ARN of the Security Hub
+    Value: !Sub arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:hub/default 
