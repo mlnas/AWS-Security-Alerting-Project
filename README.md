@@ -90,26 +90,6 @@ Verify the pipeline by:
 4. Validating JIRA ticket creation
 5. Confirming Slack notification
 
-## Project Structure
-```
-aws-security-alerting/
-├── src/
-│   ├── lambda_function.py
-│   ├── utils/
-│   │   ├── jira_handler.py
-│   │   ├── slack_handler.py
-│   │   └── finding_parser.py
-├── tests/
-│   ├── test_lambda.py
-│   └── test_handlers.py
-├── iac/
-│   ├── cloudformation/
-│   │   └── security-pipeline.yaml
-├── docs/
-│   ├── architecture.md
-│   └── setup-guide.md
-└── README.md
-```
 
 ## Security Considerations
 - All credentials stored in AWS Secrets Manager
